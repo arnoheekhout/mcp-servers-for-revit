@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Reflection;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
@@ -16,6 +16,10 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
     {
         public const string TransactionModeAuto = "auto";
         public const string TransactionModeNone = "none";
+
+        // Number of lines in the wrapper template before the user code starts,
+        // used to translate compiler line numbers back to the user's snippet.
+        private const int UserCodeLineOffset = 21;
 
         // 代码执行参数
         private string _generatedCode;
@@ -42,7 +46,8 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
         // 等待执行完成 - IWaitableExternalEventHandler接口实现
         public bool WaitForCompletion(int timeoutMilliseconds = 10000)
         {
-            _resetEvent.Reset();
+            // The event is already reset in SetExecutionParameters. Resetting here again
+            // could swallow a completion signal when Revit runs the handler quickly.
             return _resetEvent.WaitOne(timeoutMilliseconds);
         }
 
@@ -50,6 +55,8 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
         {
             try
             {
+                if (app.ActiveUIDocument == null)
+                    throw new InvalidOperationException("No active Revit document. Open or create a project first.");
                 var doc = app.ActiveUIDocument.Document;
                 ResultInfo = new ExecutionResultInfo();
 
@@ -59,22 +66,25 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
                     result = CompileAndExecuteCode(
                         code: _generatedCode,
                         doc: doc,
+                        uiApp: app,
                         parameters: _executionParameters
                     );
                 }
                 else
                 {
-                    using (var transaction = new Transaction(doc, "执行AI代码"))
+                    using (var transaction = new Transaction(doc, "MCP: execute code"))
                     {
                         transaction.Start();
 
                         result = CompileAndExecuteCode(
                             code: _generatedCode,
                             doc: doc,
+                            uiApp: app,
                             parameters: _executionParameters
                         );
 
-                        transaction.Commit();
+                        if (transaction.GetStatus() == TransactionStatus.Started)
+                            transaction.Commit();
                     }
                 }
 
@@ -83,8 +93,13 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
             }
             catch (Exception ex)
             {
+                // Unwrap reflection wrappers so the caller sees the real exception
+                var inner = ex;
+                while (inner is TargetInvocationException && inner.InnerException != null)
+                    inner = inner.InnerException;
+                ResultInfo ??= new ExecutionResultInfo();
                 ResultInfo.Success = false;
-                ResultInfo.ErrorMessage = $"执行失败: {ex.Message}";
+                ResultInfo.ErrorMessage = $"Execution failed: {inner.GetType().Name}: {inner.Message}\n{inner.StackTrace}";
             }
             finally
             {
@@ -93,24 +108,31 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
             }
         }
 
-        private object CompileAndExecuteCode(string code, Document doc, object[] parameters)
+        private object CompileAndExecuteCode(string code, Document doc, UIApplication uiApp, object[] parameters)
         {
             // 包装代码以规范入口点
             var wrappedCode = $@"
 using System;
+using System.IO;
 using System.Linq;
-using Autodesk.Revit.DB;
-using Autodesk.Revit.UI;
+using System.Text;
 using System.Collections.Generic;
+using Autodesk.Revit.DB;
+using Autodesk.Revit.DB.Architecture;
+using Autodesk.Revit.DB.Structure;
+using Autodesk.Revit.UI;
 
 namespace AIGeneratedCode
 {{
     public static class CodeExecutor
     {{
-        public static object Execute(Document document, object[] parameters)
+        public static object Execute(Document document, object[] parameters, UIApplication uiapp)
         {{
-            // 用户代码入口
-            {code}
+            var doc = document;
+            var uidoc = uiapp.ActiveUIDocument;
+            var app = uiapp.Application;
+            // user code
+{code}
         }}
     }}
 }}";
@@ -141,8 +163,8 @@ namespace AIGeneratedCode
                 {
                     var errors = string.Join("\n", result.Diagnostics
                         .Where(d => d.Severity == DiagnosticSeverity.Error)
-                        .Select(d => $"Line {d.Location.GetLineSpan().StartLinePosition.Line}: {d.GetMessage()}"));
-                    throw new Exception($"代码编译错误:\n{errors}");
+                        .Select(d => $"Line {d.Location.GetLineSpan().StartLinePosition.Line - UserCodeLineOffset + 1}: {d.GetMessage()}"));
+                    throw new Exception($"Compilation failed:\n{errors}");
                 }
 
                 // 反射调用执行方法
@@ -151,13 +173,13 @@ namespace AIGeneratedCode
                 var executorType = assembly.GetType("AIGeneratedCode.CodeExecutor");
                 var executeMethod = executorType.GetMethod("Execute");
 
-                return executeMethod.Invoke(null, new object[] { doc, parameters });
+                return executeMethod.Invoke(null, new object[] { doc, parameters, uiApp });
             }
         }
 
         public string GetName()
         {
-            return "执行AI代码";
+            return "MCP: execute code";
         }
     }
 

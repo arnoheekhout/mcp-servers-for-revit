@@ -1,4 +1,9 @@
 import * as net from "net";
+import { StringDecoder } from "string_decoder";
+
+// Default time to wait for a Revit response. Long-running commands
+// (exports, large scripts) can pass their own timeout to sendCommand.
+export const DEFAULT_COMMAND_TIMEOUT_MS = 120000;
 
 export class RevitClientConnection {
   host: string;
@@ -7,6 +12,8 @@ export class RevitClientConnection {
   isConnected: boolean = false;
   responseCallbacks: Map<string, (response: string) => void> = new Map();
   buffer: string = "";
+  // Decodes UTF-8 across chunk boundaries so multi-byte characters are not split
+  private decoder = new StringDecoder("utf8");
 
   constructor(host: string, port: number) {
     this.host = host;
@@ -22,7 +29,7 @@ export class RevitClientConnection {
 
     this.socket.on("data", (data) => {
       // 将接收到的数据添加到缓冲区
-      const dataString = data.toString();
+      const dataString = this.decoder.write(data);
       this.buffer += dataString;
 
       // 尝试解析完整的JSON响应
@@ -90,7 +97,11 @@ export class RevitClientConnection {
     }
   }
 
-  public sendCommand(command: string, params: any = {}): Promise<any> {
+  public sendCommand(
+    command: string,
+    params: any = {},
+    timeoutMs: number = DEFAULT_COMMAND_TIMEOUT_MS
+  ): Promise<any> {
     return new Promise((resolve, reject) => {
       try {
         if (!this.isConnected) {
@@ -136,9 +147,13 @@ export class RevitClientConnection {
         setTimeout(() => {
           if (this.responseCallbacks.has(requestId)) {
             this.responseCallbacks.delete(requestId);
-            reject(new Error(`Command timed out after 2 minutes: ${command}`));
+            reject(
+              new Error(
+                `Command timed out after ${Math.round(timeoutMs / 1000)} s: ${command}`
+              )
+            );
           }
-        }, 120000); // 2分钟超时
+        }, timeoutMs);
       } catch (error) {
         reject(error);
       }

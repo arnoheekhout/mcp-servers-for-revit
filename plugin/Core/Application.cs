@@ -27,7 +27,32 @@ namespace revit_mcp_plugin.Core
             mcp_settings_pushButtonData.LargeImage = new BitmapImage(new Uri("/RevitMCPPlugin;component/Core/Ressources/settings-32.png", UriKind.RelativeOrAbsolute));
             mcpPanel.AddItem(mcp_settings_pushButtonData);
 
+            // Start the MCP socket service automatically once Revit is ready,
+            // unless REVIT_MCP_AUTOSTART=0 is set.
+            if (Environment.GetEnvironmentVariable("REVIT_MCP_AUTOSTART") != "0")
+            {
+                application.ControlledApplication.ApplicationInitialized += OnApplicationInitialized;
+            }
+
             return Result.Succeeded;
+        }
+
+        private void OnApplicationInitialized(object sender, Autodesk.Revit.DB.Events.ApplicationInitializedEventArgs e)
+        {
+            try
+            {
+                var uiApp = new UIApplication(sender as Autodesk.Revit.ApplicationServices.Application);
+                SocketService service = SocketService.Instance;
+                if (!service.IsRunning)
+                {
+                    service.Initialize(uiApp);
+                    service.Start();
+                }
+            }
+            catch (Exception)
+            {
+                // The ribbon switch remains available to start the service manually
+            }
         }
 
         public Result OnShutdown(UIControlledApplication application)
