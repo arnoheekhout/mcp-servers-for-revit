@@ -4,8 +4,9 @@ import path from "path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { executeCodeInRevit, formatExecutionResult } from "../utils/executeCode.js";
 
-// C# body: parameters = [outputDir, filePrefix, pixelSize, format, fitDirection, dpi, view1, view2, ...]
+// C# body: parameters = [outputDir, filePrefix, pixelSize, format, fitDirection, dpi, lightCanvas, view1, view2, ...]
 // Views are matched by element id or by exact name ("active" = active view).
+const FIRST_VIEW_INDEX = 7;
 const EXPORT_CODE = `
 string outDir = (string)parameters[0];
 string prefix = (string)parameters[1];
@@ -13,13 +14,14 @@ int pixelSize = int.Parse((string)parameters[2]);
 string format = ((string)parameters[3]).ToLowerInvariant();
 string fit = ((string)parameters[4]).ToLowerInvariant();
 int dpi = int.Parse((string)parameters[5]);
+bool lightCanvas = (string)parameters[6] == "true";
 Directory.CreateDirectory(outDir);
 
 var allViews = new FilteredElementCollector(doc).OfClass(typeof(View)).Cast<View>()
     .Where(v => !v.IsTemplate).ToList();
 var ids = new List<ElementId>();
 var missing = new List<string>();
-for (int i = 6; i < parameters.Length; i++)
+for (int i = ${FIRST_VIEW_INDEX}; i < parameters.Length; i++)
 {
     string key = (string)parameters[i];
     View match = null;
@@ -48,7 +50,18 @@ var opts = new ImageExportOptions
     ImageResolution = res,
 };
 opts.SetViewsAndSheets(ids);
-doc.ExportImage(opts);
+// Image export uses the canvas background; with a dark Revit theme the
+// exported images are dark. Switch to the light canvas for the export only.
+var previousCanvas = UIThemeManager.CurrentCanvasTheme;
+try
+{
+    if (lightCanvas && previousCanvas != UITheme.Light) UIThemeManager.CurrentCanvasTheme = UITheme.Light;
+    doc.ExportImage(opts);
+}
+finally
+{
+    if (UIThemeManager.CurrentCanvasTheme != previousCanvas) UIThemeManager.CurrentCanvasTheme = previousCanvas;
+}
 
 var files = Directory.GetFiles(outDir)
     .Where(f => !before.Contains(f) || File.GetLastWriteTime(f) >= started)
@@ -68,6 +81,10 @@ export function registerExportViewImageTool(server: McpServer) {
       fitDirection: z.enum(["horizontal", "vertical"]).default("horizontal"),
       format: z.enum(["png", "jpg", "tif"]).default("png"),
       dpi: z.number().int().default(150).describe("Resolution tag: 72, 150, 300 or 600"),
+      lightCanvas: z
+        .boolean()
+        .default(true)
+        .describe("Temporarily switch Revit to the light canvas theme so exports have a white background"),
       timeoutSeconds: z.number().int().min(10).max(3600).default(600),
     },
     async (args) => {
@@ -80,6 +97,7 @@ export function registerExportViewImageTool(server: McpServer) {
           args.format,
           args.fitDirection,
           String(args.dpi),
+          String(args.lightCanvas),
           ...args.views,
         ];
         // Image export cannot run inside an open transaction

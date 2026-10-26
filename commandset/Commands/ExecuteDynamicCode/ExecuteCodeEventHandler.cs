@@ -55,9 +55,11 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
         {
             try
             {
-                if (app.ActiveUIDocument == null)
-                    throw new InvalidOperationException("No active Revit document. Open or create a project first.");
-                var doc = app.ActiveUIDocument.Document;
+                // Without an open project only transactionMode "none" can run (doc is null),
+                // which lets scripts create or open documents themselves.
+                var doc = app.ActiveUIDocument?.Document;
+                if (doc == null && _transactionMode != TransactionModeNone)
+                    throw new InvalidOperationException("No active Revit document. Open or create a project first, or use transactionMode 'none'.");
                 ResultInfo = new ExecutionResultInfo();
 
                 object result;
@@ -140,8 +142,16 @@ namespace AIGeneratedCode
             var syntaxTree = CSharpSyntaxTree.ParseText(wrappedCode);
 
             // 添加必要的程序集引用（引用所有已加载的程序集）
+            // Other add-ins can load their own copy of an assembly (same simple name,
+            // different file), which Roslyn rejects as a duplicate import. Keep one
+            // per name, preferring the copy that ships with Revit itself.
+            string revitDir = Path.GetDirectoryName(typeof(Document).Assembly.Location) ?? "";
             var references = AppDomain.CurrentDomain.GetAssemblies()
                 .Where(a => !a.IsDynamic && !string.IsNullOrEmpty(a.Location))
+                .GroupBy(a => a.GetName().Name, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.OrderByDescending(a => string.Equals(Path.GetDirectoryName(a.Location), revitDir, StringComparison.OrdinalIgnoreCase))
+                              .ThenByDescending(a => a.GetName().Version)
+                              .First())
                 .Select(a => MetadataReference.CreateFromFile(a.Location))
                 .Cast<MetadataReference>()
                 .ToList();
@@ -163,7 +173,11 @@ namespace AIGeneratedCode
                 {
                     var errors = string.Join("\n", result.Diagnostics
                         .Where(d => d.Severity == DiagnosticSeverity.Error)
-                        .Select(d => $"Line {d.Location.GetLineSpan().StartLinePosition.Line - UserCodeLineOffset + 1}: {d.GetMessage()}"));
+                        .Select(d =>
+                        {
+                            int line = d.Location.GetLineSpan().StartLinePosition.Line - UserCodeLineOffset + 1;
+                            return line >= 1 ? $"Line {line}: {d.GetMessage()}" : $"(wrapper/global): {d.GetMessage()}";
+                        }));
                     throw new Exception($"Compilation failed:\n{errors}");
                 }
 
