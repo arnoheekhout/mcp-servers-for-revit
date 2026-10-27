@@ -51,8 +51,40 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
             return _resetEvent.WaitOne(timeoutMilliseconds);
         }
 
+        // Warnings and errors raised while the user code runs. Revit would otherwise
+        // show them in a modal dialog, which blocks every following MCP request.
+        private readonly List<string> _failures = new List<string>();
+        private bool _hadErrors;
+
+        private void OnFailuresProcessing(object sender, Autodesk.Revit.DB.Events.FailuresProcessingEventArgs e)
+        {
+            var accessor = e.GetFailuresAccessor();
+            bool hasError = false;
+            foreach (var message in accessor.GetFailureMessages())
+            {
+                var severity = message.GetSeverity();
+                string text = $"{severity}: {message.GetDescriptionText()} ({message.GetFailingElementIds().Count} elements)";
+                if (!_failures.Contains(text)) _failures.Add(text);
+                if (severity == FailureSeverity.Warning) accessor.DeleteWarning(message);
+                else hasError = true;
+            }
+            if (hasError)
+            {
+                // Roll back instead of asking the user; the errors are reported in the result
+                _hadErrors = true;
+                e.SetProcessingResult(FailureProcessingResult.ProceedWithRollBack);
+            }
+            else
+            {
+                e.SetProcessingResult(FailureProcessingResult.Continue);
+            }
+        }
+
         public void Execute(UIApplication app)
         {
+            _failures.Clear();
+            _hadErrors = false;
+            app.Application.FailuresProcessing += OnFailuresProcessing;
             try
             {
                 // Without an open project only transactionMode "none" can run (doc is null),
@@ -85,13 +117,16 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
                             parameters: _executionParameters
                         );
 
-                        if (transaction.GetStatus() == TransactionStatus.Started)
-                            transaction.Commit();
+                        if (transaction.GetStatus() == TransactionStatus.Started &&
+                            transaction.Commit() == TransactionStatus.RolledBack)
+                            throw new InvalidOperationException("Transaction rolled back by Revit:\n" + string.Join("\n", _failures));
                     }
                 }
 
                 ResultInfo.Success = true;
                 ResultInfo.Result = JsonConvert.SerializeObject(result);
+                ResultInfo.Warnings = _failures.ToList();
+                if (_hadErrors) ResultInfo.Warnings.Insert(0, "At least one transaction was rolled back because of errors.");
             }
             catch (Exception ex)
             {
@@ -105,6 +140,7 @@ namespace RevitMCPCommandSet.Commands.ExecuteDynamicCode
             }
             finally
             {
+                app.Application.FailuresProcessing -= OnFailuresProcessing;
                 TaskCompleted = true;
                 _resetEvent.Set();
             }
@@ -208,5 +244,9 @@ namespace AIGeneratedCode
 
         [JsonProperty("errorMessage")]
         public string ErrorMessage { get; set; } = string.Empty;
+
+        // Revit warnings/errors that were handled without a dialog
+        [JsonProperty("warnings")]
+        public List<string> Warnings { get; set; } = new List<string>();
     }
 }

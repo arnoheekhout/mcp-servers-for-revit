@@ -1,5 +1,6 @@
 import * as net from "net";
 import { StringDecoder } from "string_decoder";
+import { JsonMessageFramer } from "./JsonMessageFramer.js";
 
 // Default time to wait for a Revit response. Long-running commands
 // (exports, large scripts) can pass their own timeout to sendCommand.
@@ -14,6 +15,7 @@ export class RevitClientConnection {
   buffer: string = "";
   // Decodes UTF-8 across chunk boundaries so multi-byte characters are not split
   private decoder = new StringDecoder("utf8");
+  private framer = new JsonMessageFramer();
 
   constructor(host: string, port: number) {
     this.host = host;
@@ -47,14 +49,12 @@ export class RevitClientConnection {
   }
 
   private processBuffer(): void {
-    try {
-      // 尝试解析JSON
-      const response = JSON.parse(this.buffer);
-      // 如果成功解析，处理响应并清空缓冲区
-      this.handleResponse(this.buffer);
-      this.buffer = "";
-    } catch (e) {
-      // 如果解析失败，可能是因为数据不完整，继续等待更多数据
+    // Responses can arrive split over several chunks or back to back in one
+    // chunk; hand every complete JSON message to its callback.
+    const messages = this.framer.push(this.buffer);
+    this.buffer = "";
+    for (const message of messages) {
+      this.handleResponse(message);
     }
   }
 
@@ -85,7 +85,12 @@ export class RevitClientConnection {
     try {
       const response = JSON.parse(responseData);
       // 从响应中获取ID
-      const requestId = response.id || "default";
+      let requestId = response.id || "default";
+      // Errors raised before the request could be parsed carry no id; with a
+      // single pending request it can only belong to that one.
+      if (!response.id && this.responseCallbacks.size === 1) {
+        requestId = this.responseCallbacks.keys().next().value as string;
+      }
 
       const callback = this.responseCallbacks.get(requestId);
       if (callback) {

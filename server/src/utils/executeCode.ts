@@ -37,5 +37,10 @@ export function formatExecutionResult(response: any): { ok: boolean; text: strin
       // keep raw string
     }
   }
-  return { ok: true, text: JSON.stringify(result, null, 2) };
+  let text = JSON.stringify(result, null, 2);
+  // Revit warnings are dismissed in the plugin (no modal dialog) and reported here
+  if (Array.isArray(response?.warnings) && response.warnings.length > 0) {
+    text += "\nRevit warnings:\n- " + response.warnings.join("\n- ");
+  }
+  return { ok: true, text };
 }

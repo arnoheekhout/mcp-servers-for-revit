@@ -173,6 +173,11 @@ namespace revit_mcp_plugin.Core
             try
             {
                 byte[] buffer = new byte[8192];
+                char[] chars = new char[Encoding.UTF8.GetMaxCharCount(buffer.Length)];
+                // A request can span several reads (large code payloads) and a
+                // multi-byte UTF-8 character can be split between two reads.
+                Decoder decoder = Encoding.UTF8.GetDecoder();
+                var framer = new JsonMessageFramer();
 
                 while (_isRunning && tcpClient.Connected)
                 {
@@ -198,15 +203,18 @@ namespace revit_mcp_plugin.Core
                         break;
                     }
 
-                    string message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    System.Diagnostics.Trace.WriteLine($"收到消息: {message}\nReceived message: {message}");
+                    int charCount = decoder.GetChars(buffer, 0, bytesRead, chars, 0);
+                    foreach (string message in framer.Push(new string(chars, 0, charCount)))
+                    {
+                        System.Diagnostics.Trace.WriteLine($"Received message ({message.Length} chars)");
 
-                    string response = ProcessJsonRPCRequest(message);
+                        string response = ProcessJsonRPCRequest(message);
 
-                    // 发送响应
-                    // Send response.
-                    byte[] responseData = Encoding.UTF8.GetBytes(response);
-                    stream.Write(responseData, 0, responseData.Length);
+                        // 发送响应
+                        // Send response.
+                        byte[] responseData = Encoding.UTF8.GetBytes(response);
+                        stream.Write(responseData, 0, responseData.Length);
+                    }
                 }
             }
             catch(Exception)
